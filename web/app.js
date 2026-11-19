@@ -1,11 +1,11 @@
 import {mockPeople} from '../examples/mock23.js';
-import {SHIFTS,ROLES,REQUIRED_ROLES} from '../src/model.js';
+import {SHIFTS,ROLES,REQUIRED_ROLES,eligible} from '../src/model.js';
 import {validateRoster} from '../src/validate.js';
 import {analyzeFairness} from '../src/metrics.js';
 const $=id=>document.getElementById(id),roleNames={leader:'분대장',driver:'조종수',m60:'M60',rifle:'소총수',radio:'통신병',reserveDriver:'예비 조종수'};
 const monday=$('monday'),status=$('status'),metrics=$('metrics'),save=$('save');
 const today=new Date(),weekday=(today.getDay()+6)%7;today.setDate(today.getDate()-weekday);monday.value=[today.getFullYear(),String(today.getMonth()+1).padStart(2,'0'),String(today.getDate()).padStart(2,'0')].join('-');
-let working=null,versions=[],people=structuredClone(mockPeople),restrictions=[];
+let working=null,versions=[],people=structuredClone(mockPeople),restrictions=[],undoRoster=null,editingSlot=null;
 function gapLabels(assignments,history=[]){const groups=new Map(),labels=new Map();for(const a of assignments){if(!groups.has(a.personId))groups.set(a.personId,[]);groups.get(a.personId).push(a);}for(const [id,items] of groups){items.sort((a,b)=>(a.day*5+a.shift)-(b.day*5+b.shift));let prev=history.filter(h=>h.personId===id&&Number.isInteger(h.seq)).reduce((max,h)=>Math.max(max,h.seq),-Infinity);for(const a of items){const seq=a.day*5+a.shift;const gap=seq-prev;if(Number.isFinite(prev)&&gap!==4)labels.set(`${a.day}/${a.shift}/${a.role}`,String(gap));prev=seq;}}return labels;}
 function outAssignments(assignments,restrictions=[],mondayISO){const out=new Set();if(!mondayISO)return out;const base=Date.parse(mondayISO+'T00:00:00Z');for(const r of restrictions){if(r.type!=='leave'||!r.start||!r.personId)continue;const leaveStart=Date.parse(r.start+'Z');if(!Number.isFinite(leaveStart))continue;let last=null,lastEnd=-Infinity;for(const a of assignments){if(a.personId!==r.personId)continue;const date=new Date(base+a.day*86400000).toISOString().slice(0,10);const iv=SHIFTS[a.shift];const start=Date.parse(date+'T'+iv.start+':00Z')+(a.shift===4?86400000:0);const end=start+iv.durationMinutes*60000;if(end<=leaveStart&&end>lastEnd){last=a;lastEnd=end;}}if(last)out.add(`${last.day}/${last.shift}/${last.role}`);}return out;}
 function dbOpen(){return new Promise((resolve,reject)=>{const request=indexedDB.open('roster-demo-v09',1);request.onupgradeneeded=()=>request.result.createObjectStore('state');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});}
@@ -16,11 +16,12 @@ function dateAt(day){const d=new Date(monday.value+'T00:00:00Z');d.setUTCDate(d.
 function render(){const head=$('roster').tHead,body=$('roster').tBodies[0];head.replaceChildren();body.replaceChildren();const hr=head.insertRow();for(const title of ['날짜','근무',...ROLES.map(role=>roleNames[role])]){const th=document.createElement('th');th.textContent=title;hr.append(th);}
  const assignments=working?.assignments||[],gapBySlot=gapLabels(assignments,working?.history||[]),outs=outAssignments(assignments,working?.restrictions||[],working?.mondayISO);const bySlot=new Map(assignments.map(a=>[`${a.day}/${a.shift}/${a.role}`,a]));const byId=new Map(people.map(p=>[p.id,p]));
  for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++){const tr=body.insertRow();if(shift===0)tr.className='day-start';const date=tr.insertCell();date.className='date-cell';if(shift===0){date.textContent=`${dateAt(day)} (${['월','화','수','목','금','토','일','월'][day]})`;date.rowSpan=5;}else{date.remove();}const label=tr.insertCell();label.className='shift-cell';label.textContent=SHIFTS[shift].label;
- for(const role of ROLES){const td=tr.insertCell(),a=bySlot.get(`${day}/${shift}/${role}`);const key=`${day}/${shift}/${role}`;td.textContent=a?`${byId.get(a.personId)?.name||a.personId}${gapBySlot.has(key)?' '+gapBySlot.get(key):''}${outs.has(key)?' OUT':''}`:REQUIRED_ROLES.includes(role)?'미배정':'+';if(!a)td.className=REQUIRED_ROLES.includes(role)?'empty':'optional-empty';}}
+ for(const role of ROLES){const td=tr.insertCell(),a=bySlot.get(`${day}/${shift}/${role}`);const key=`${day}/${shift}/${role}`;td.textContent=a?`${byId.get(a.personId)?.name||a.personId}${gapBySlot.has(key)?' '+gapBySlot.get(key):''}${outs.has(key)?' OUT':''}`:REQUIRED_ROLES.includes(role)?'미배정':'+';if(!a)td.className=REQUIRED_ROLES.includes(role)?'empty':'optional-empty';td.classList.add('editable-slot');td.tabIndex=0;td.setAttribute('role','button');td.setAttribute('aria-label',`${dateAt(day)} ${SHIFTS[shift].label} ${roleNames[role]} 근무 수정`);td.onclick=()=>openRosterEditor(day,shift,role);td.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openRosterEditor(day,shift,role);}};}}
+ $('undo-edit').disabled=!undoRoster;
  if(working){const v=validateRoster({mondayISO:working.mondayISO,people,assignments:working.assignments,restrictions:working.restrictions||[],history:working.history||[]});metrics.replaceChildren();for(const text of [`필수 미배정 ${v.missingRequired.length}개`,`하드 오류 ${v.errors.length}건`,`총 배정 ${working.assignments.length}건`,`엔진 ${working.engine}`]){const span=document.createElement('span');span.textContent=text;metrics.append(span);}save.disabled=!v.valid;}else{metrics.replaceChildren();save.disabled=true;}
  renderStats();
  renderPeople();renderRestrictions();
- const list=$('versions');list.replaceChildren();if(!versions.length)list.textContent='저장된 버전이 없습니다.';for(const [i,v] of versions.entries()){const row=document.createElement('div');row.className='version-row';const title=document.createElement('span');title.textContent=`V${i+1} · ${v.mondayISO} · ${new Date(v.savedAt).toLocaleString('ko-KR')}`;const btn=document.createElement('button');btn.textContent='현재 작업본으로 복원';btn.onclick=async()=>{working=structuredClone(v.snapshot);monday.value=working.mondayISO;await writeState();render();status.textContent=`V${i+1}을 현재 작업본으로 복원했어요. 기존 버전은 유지됩니다.`};row.append(title,btn);list.append(row);}}
+ const list=$('versions');list.replaceChildren();if(!versions.length)list.textContent='저장된 버전이 없습니다.';for(const [i,v] of versions.entries()){const row=document.createElement('div');row.className='version-row';const title=document.createElement('span');title.textContent=`V${i+1} · ${v.mondayISO} · ${new Date(v.savedAt).toLocaleString('ko-KR')}`;const btn=document.createElement('button');btn.textContent='현재 작업본으로 복원';btn.onclick=async()=>{working=structuredClone(v.snapshot);undoRoster=null;monday.value=working.mondayISO;await writeState();render();status.textContent=`V${i+1}을 현재 작업본으로 복원했어요. 기존 버전은 유지됩니다.`};row.append(title,btn);list.append(row);}}
 function renderStats(){const container=$('stats'),summary=$('stats-summary'),body=$('stats-body');if(!container||!summary||!body)return;body.replaceChildren();summary.replaceChildren();container.hidden=!working;if(!working)return;
  const assignments=working.assignments||[],fairness=analyzeFairness(assignments,people,[]);
  const optionalCount=assignments.filter(a=>a.role==='radio'||a.role==='reserveDriver').length;const gaps=[];for(const person of people){const seqs=assignments.filter(a=>a.personId===person.id).map(a=>a.day*5+a.shift).sort((a,b)=>a-b);for(let i=1;i<seqs.length;i++)gaps.push(seqs[i]-seqs[i-1]);}const values=fairness.perPerson.map(p=>p.weekCount),below=values.filter(v=>v<8).length,above=values.filter(v=>v>9).length;
@@ -28,11 +29,11 @@ function renderStats(){const container=$('stats'),summary=$('stats-summary'),bod
  const byId=new Map(people.map(p=>[p.id,p]));const roleNamesShort={leader:'분대장',driver:'조종수',rifle:'소총수'};
  for(const p of fairness.perPerson){const person=byId.get(p.personId),weekly=assignments.filter(a=>a.personId===p.personId&&a.day<7),all=assignments.filter(a=>a.personId===p.personId);const tr=body.insertRow();const values=[person?.name||p.personId,roleNamesShort[person?.baseRole]||'-',String(p.weekCount),String(all.length),...Array.from({length:5},(_,shift)=>String(weekly.filter(a=>a.shift===shift).length)),String(p.nightCount),(all.reduce((sum,a)=>sum+SHIFTS[a.shift].durationMinutes,0)/60).toFixed(1),String(p.threeGaps)];for(let i=0;i<values.length;i++){const td=tr.insertCell();td.textContent=values[i];if(i===2&&(p.weekCount<8||p.weekCount>9))td.className='stat-warning';}}
 }
-$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=122');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
+$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=130');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});undoRoster=null;working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
 save.onclick=async()=>{if(!working)return;versions.push({mondayISO:working.mondayISO,savedAt:new Date().toISOString(),snapshot:structuredClone(working)});await writeState();render();status.textContent=`V${versions.length} 저장 완료`};
-$('restore').onclick=async()=>{try{const state=await readState();if(!state){status.textContent='저장된 작업본이 없습니다.';return;}working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;render();status.textContent='기기에 저장된 작업본을 불러왔습니다.';}catch(e){status.textContent='불러오기 실패: '+e}};
-try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.12.2 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
-if(!working)status.textContent='v0.12.2 실행 중 · 자동 편성을 눌러 테스트하세요.';
+$('restore').onclick=async()=>{try{const state=await readState();if(!state){status.textContent='저장된 작업본이 없습니다.';return;}working=state.working;undoRoster=null;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;render();status.textContent='기기에 저장된 작업본을 불러왔습니다.';}catch(e){status.textContent='불러오기 실패: '+e}};
+try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.13.0 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
+if(!working)status.textContent='v0.13.0 실행 중 · 자동 편성을 눌러 테스트하세요.';
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 function renderPeople(){
  const body=$('people-body'),summary=$('people-summary');if(!body)return;
@@ -149,4 +150,40 @@ $('backup-import').onchange=async e=>{
   if(working)monday.value=working.mondayISO;
   render();$('backup-status').textContent='백업 복원 완료 · 인원 '+people.length+'명';
  }catch(err){$('backup-status').textContent='복원 실패: '+String(err.message||err);}
+};
+
+function openRosterEditor(day,shift,role){
+ if(!working){status.textContent='먼저 자동 편성하거나 근무표를 불러오세요.';return;}
+ editingSlot={day,shift,role};
+ const current=working.assignments.find(a=>a.day===day&&a.shift===shift&&a.role===role);
+ $('edit-title').textContent=`${dateAt(day)} · ${SHIFTS[shift].label} · ${roleNames[role]}`;
+ const select=$('edit-person');select.replaceChildren();
+ const blank=document.createElement('option');blank.value='';blank.textContent=REQUIRED_ROLES.includes(role)?'미배정 (필수 보직)':'배정 없음';select.append(blank);
+ for(const p of people.filter(p=>eligible(p,role))){
+  const opt=document.createElement('option');opt.value=p.id;opt.textContent=`${p.name} · ${roleNames[p.baseRole]}`;select.append(opt);
+ }
+ select.value=current?.personId||'';
+ $('edit-lock').checked=!!current?.locked;
+ $('edit-error').textContent='';
+ $('edit-dialog').showModal();
+}
+$('edit-cancel').onclick=()=>$('edit-dialog').close();
+$('edit-form').onsubmit=async e=>{
+ e.preventDefault();if(!editingSlot||!working)return;
+ const {day,shift,role}=editingSlot,personId=$('edit-person').value,locked=$('edit-lock').checked;
+ const before=structuredClone(working),next=working.assignments.filter(a=>!(a.day===day&&a.shift===shift&&a.role===role));
+ if(personId)next.push({day,shift,role,personId,...(locked?{locked:true}:{})});
+ const result=validateRoster({mondayISO:working.mondayISO,people,assignments:next,restrictions:working.restrictions||[],history:working.history||[]});
+ if(result.errors.length){$('edit-error').textContent='변경 불가: '+result.errors[0].code+' · 보직 자격, 휴가·외출, 근무 간격(최소 3조)을 확인하세요.';return;}
+ if(REQUIRED_ROLES.includes(role)&&!personId){$('edit-error').textContent='필수 보직은 비워 둘 수 없습니다.';return;}
+ working.assignments=next;
+ try{await writeState();}catch(err){working=before;$('edit-error').textContent='저장 실패: '+String(err);return;}
+ undoRoster=before;$('edit-dialog').close();render();
+ status.textContent='근무 수정 및 기기 저장 완료 · 이전 수정은 되돌리기 가능';
+};
+$('undo-edit').onclick=async()=>{
+ if(!undoRoster)return;
+ const previous=working;working=undoRoster;
+ try{await writeState();}catch(err){working=previous;status.textContent='되돌리기 저장 실패: '+err;return;}
+ undoRoster=null;render();status.textContent='직전 근무 수정을 되돌렸습니다.';
 };
