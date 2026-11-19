@@ -1,0 +1,30 @@
+export const SHIFTS = [
+  {id:'morning',label:'오전',start:'07:45',end:'12:15',durationMinutes:270},
+  {id:'afternoon',label:'오후',start:'12:15',end:'17:15',durationMinutes:300},
+  {id:'evening',label:'석간',start:'17:15',end:'21:45',durationMinutes:270},
+  {id:'thirteen',label:'열셋',start:'21:45',end:'02:45',durationMinutes:300},
+  {id:'last',label:'말번',start:'02:45',end:'07:45',durationMinutes:300}
+];
+export const ROLES = ['leader','driver','m60','rifle','radio','reserveDriver'];
+export const REQUIRED_ROLES = ROLES.slice(0,4);
+export const OPTIONAL_ROLES = ROLES.slice(4);
+export const SLOTS_PER_DAY = SHIFTS.length * ROLES.length;
+export const WEEK_DAYS = 8;
+export const MIN_GAP = 3;
+export function slotIndex(day,shiftIndex){return day*SHIFTS.length+shiftIndex;}
+export function shiftInterval(dateISO, shiftId){
+ const s=SHIFTS.find(x=>x.id===shiftId); if(!s)throw Error('Unknown shift');
+ const date=new Date(dateISO+'T00:00:00Z');
+ const [h,m]=s.start.split(':').map(Number);
+ if(shiftId==='last') date.setUTCDate(date.getUTCDate()+1);
+ date.setUTCHours(h,m,0,0);
+ return {start:date.getTime(),end:date.getTime()+s.durationMinutes*60000};
+}
+export function eligible(person,role){
+ if(role==='radio')return true;
+ if(role==='leader')return person.baseRole==='leader';
+ if(role==='driver'||role==='reserveDriver')return person.baseRole==='driver';
+ if(role==='m60'||role==='rifle')return ['rifle','driver','leader'].includes(person.baseRole);
+ return false;
+}
+export function countMinutes(assignments){return assignments.reduce((total,a)=>total+SHIFTS[a.shift].durationMinutes,0);}
