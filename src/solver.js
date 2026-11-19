@@ -1,4 +1,4 @@
-import {SHIFTS,REQUIRED_ROLES,OPTIONAL_ROLES,eligible,shiftInterval} from './model.js';
+import {SHIFTS,REQUIRED_ROLES,OPTIONAL_ROLES,eligible,shiftInterval,allowedBeforeLeave,leaveOutRule} from './model.js';
 import {validateRoster} from './validate.js';
 import {analyzeFairness} from './metrics.js';
 
@@ -26,7 +26,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const substitution=(p,role)=>role==='rifle'||role==='m60'?(p.baseRole==='rifle'?0:p.baseRole==='driver'?900:1800):0;
  const available=(p,a,roster,skip1=-1,skip2=-1)=>{
   const q=seq(a);
-  return eligible(p,a.role)&&!blocked.get(p.id)[q]&&
+  return eligible(p,a.role)&&!blocked.get(p.id)[q]&&allowedBeforeLeave(input.mondayISO,input.restrictions||[],p.id,a.day,a.shift)&&
    !(history.get(p.id)||[]).some(x=>Math.abs(x-q)<3)&&
    roster.every((x,i)=>i===skip1||i===skip2||x.personId!==p.id||Math.abs(seq(x)-q)>=3);
  };
@@ -39,6 +39,11 @@ export async function generateRoster(input,{limitMs=60000}={}){
    const all=grouped.get(p.id).sort((a,b)=>a.q-b.q);
    const within=all.filter(x=>x.q>=0);
    const count=within.filter(x=>x.q<35).length;
+   for(const rule of leaveOutRule(input.mondayISO,input.restrictions||[],p.id)){
+    if(rule.outDay<0||rule.outDay>7)continue;
+    const out=within.some(x=>Math.floor(x.q/5)===rule.outDay&&x.q%5<=2);
+    if(!out)total+=3000;
+   }
    total+=12*(count-target)**2;
    const first=within[0]?.q,last=within.at(-1)?.q;
    // An available person must not disappear at the start or end.
@@ -84,7 +89,8 @@ export async function generateRoster(input,{limitMs=60000}={}){
     const idle=previous.length?Math.max(0,gap-5):Math.max(0,q-4);
     const gapCost=gap===4?0:gap===3?85:gap===5?9:gap===6?35:gap>6?75+(gap-7)*30:0;
     const tie=((p.id.length*19+p.id.charCodeAt(0)*7+attempt*31+q*13)%31)/31;
-    return base+gapCost+idle*idle*35+(consecutive?850:0)+(counts.get(p.id)||0)*9+tie*(attempt%7+1)*2;
+    const outBonus=leaveOutRule(input.mondayISO,input.restrictions||[],p.id).some(r=>r.outDay===slot.day&&slot.shift<=2)?-3000:0;
+    return base+outBonus+gapCost+idle*idle*35+(consecutive?850:0)+(counts.get(p.id)||0)*9+tie*(attempt%7+1)*2;
    };
    options.sort((a,b)=>priority(a)-priority(b)||a.id.localeCompare(b.id));
    const pick=options[0];
@@ -108,7 +114,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-coverage-v7',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-out-v8',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
 }
 function repairUnassigned(initial,people,blocked,available,score,deadline){
