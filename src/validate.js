@@ -1,4 +1,4 @@
-import {SHIFTS,ROLES,REQUIRED_ROLES,MIN_GAP,slotIndex,shiftInterval,eligible,allowedBeforeLeave} from './model.js?v=201';
+import {SHIFTS,ROLES,REQUIRED_ROLES,MIN_GAP,slotIndex,shiftInterval,eligible,allowedBeforeLeave} from './model.js?v=211';
 // assignments: [{day:0..7, shift:0..4, role:'leader'..., personId:'...'}]
 // restrictions: [{personId, start:'YYYY-MM-DDTHH:mm', end:'YYYY-MM-DDTHH:mm'}]
 // locked assignments use the same shape with locked:true.
