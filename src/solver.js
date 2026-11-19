@@ -4,7 +4,7 @@ import {analyzeFairness} from './metrics.js';
 
 // Whole-roster iterative optimization. Hard constraints are never traded for score.
 export async function generateRoster(input,{limitMs=60000}={}){
- const started=Date.now(),deadline=started+Math.min(limitMs,14000);
+ const started=Date.now(),deadline=started+Math.min(limitMs,10500),optionalDeadline=started+Math.min(limitMs,14000);
  if(!input||!Array.isArray(input.people)||!Array.isArray(input.assignments||[])||!Array.isArray(input.restrictions||[])||!Array.isArray(input.history||[]))throw Error('잘못된 입력');
  const monday=new Date(input.mondayISO+'T00:00:00Z');
  if(!Number.isFinite(monday.getTime())||monday.getUTCDay()!==1)throw Error('월요일 날짜가 필요합니다');
@@ -109,12 +109,12 @@ export async function generateRoster(input,{limitMs=60000}={}){
  if(completed){
   // Repair uncovered personnel before considering optional duties.
   best=repairUnassigned(best,people,blocked,available,score,deadline);
-  best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,14000));
+  best=fillOptionalSlots(best,people,blocked,history,input.mondayISO,input.restrictions||[],optionalDeadline);
  }
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-out-v8',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-flex-optional-v9',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
 }
 function repairUnassigned(initial,people,blocked,available,score,deadline){
@@ -172,76 +172,61 @@ function optimize(roster,people,available,score,deadline){
  }
  return roster;
 }
-function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
- const roster=initial.map(a=>({...a})),byId=new Map(people.map(p=>[p.id,p]));
- const index=a=>a.day*5+a.shift;
- const gapCost=gap=>gap===4?0:gap===3?60:gap===5?6:gap===6?22:gap===7?60:gap>=8?100+(gap-8)*25:200;
- const occupiedSlots=new Set(roster.map(a=>`${a.day}/${a.shift}/${a.role}`));
- const slots=[];
- for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++)for(const role of OPTIONAL_ROLES){
-  if(!occupiedSlots.has(`${day}/${shift}/${role}`))slots.push({day,shift,role});
- }
- const assignments=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>({seq:index(a),role:a.role}))]));
- const histories=new Map(people.map(p=>[p.id,[...(history.get(p.id)||[])]]));
- const weekly=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7).length]));
- const nights=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7&&a.shift>=3).length]));
- const totalNight=roster.filter(a=>a.day<7&&a.shift>=3).length;
- const nightTarget=(totalNight+15)/people.length;
- const deltaFor=(p,slot)=>{
-  if(!eligible(p,slot.role)||blocked.get(p.id)?.[index(slot)])return Infinity;
-  const seq=index(slot),current=assignments.get(p.id),all=[...current.map(a=>a.seq),...histories.get(p.id)].sort((a,b)=>a-b);
-  if(all.some(x=>Math.abs(x-seq)<3))return Infinity;
-  const prevDuty=current.filter(a=>a.seq<seq).sort((a,b)=>b.seq-a.seq)[0];
-  const nextDuty=current.filter(a=>a.seq>seq).sort((a,b)=>a.seq-b.seq)[0];
-  // Optional duties are exceptional: do not chain two optional duties for the same person.
-  if((prevDuty&&OPTIONAL_ROLES.includes(prevDuty.role))||(nextDuty&&OPTIONAL_ROLES.includes(nextDuty.role)))return Infinity;
-  const before=all.filter(x=>x<seq).at(-1),after=all.find(x=>x>seq);
-  let delta=0;
-  if(before!==undefined&&after!==undefined)delta-=gapCost(after-before);
-  if(before!==undefined)delta+=gapCost(seq-before);
-  if(after!==undefined)delta+=gapCost(after-seq);
-  const count=weekly.get(p.id),add=slot.day<7?1:0;
-  delta+=20*((count+add-8.35)**2-(count-8.35)**2);
-  if(add&&count>=9)delta+=60;
-  if(slot.day>=7)delta+=7;
-  if(add&&slot.shift>=3){
-   const n=nights.get(p.id);
-   delta+=4*((n+1-nightTarget)**2-(n-nightTarget)**2);
-  }
-  // Optional duties may be 3 shifts apart; never move or remove required duties.
-  // Only fill an internal gap, with a measurable spacing improvement.
-  if(before===undefined||after===undefined||after-before<7)return Infinity;
-  if(seq-before<3||after-seq<3)return Infinity;
-  const earlier=all.filter(x=>x<before).at(-1);
-  const later=all.find(x=>x>after);
-  if(earlier!==undefined&&before-earlier===3&&seq-before===3)return Infinity;
-  if(later!==undefined&&later-after===3&&after-seq===3)return Infinity;
-  if(seq-before===3&&after-seq===3)return Infinity;
-  // A long gap is worth bridging even when one new interval is 3.
-  // Adding optional duties solely to equalize duty counts is not sufficient.
-  if(delta>=-10)return Infinity;
-  delta+=12;
-  // Keep reserve-driver assignments for drivers, and prefer rifle specialists for radio.
-  if(slot.role==='radio'&&p.baseRole==='leader')delta+=15;
-  if(slot.role==='radio'&&p.baseRole==='driver')delta+=10;
-  return delta;
+function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions,deadline){
+ // Fill optional positions only after required assignments are complete.
+ // Optional duties can have 3-shift gaps, but must never displace required duties.
+ const roster=initial.map(a=>({...a}));
+ const seq=a=>a.day*5+a.shift;
+ const key=a=>a.day+'/'+a.shift+'/'+a.role;
+ const occupied=new Set(roster.map(key));
+ const byPerson=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>({q:seq(a),role:a.role}))]));
+ const gapCost=g=>g===4?0:g===3?35:g===5?8:g===6?28:g===7?75:g>=8?120+(g-8)*35:500;
+ const evaluate=(p,slot)=>{
+  if(!eligible(p,slot.role)||blocked.get(p.id)[seq(slot)]||
+    !allowedBeforeLeave(mondayISO,restrictions,p.id,slot.day,slot.shift))return Infinity;
+  const q=seq(slot),duties=byPerson.get(p.id);
+  const all=[...duties.map(x=>x.q),...(history.get(p.id)||[])].sort((a,b)=>a-b);
+  if(all.some(x=>Math.abs(x-q)<3))return Infinity;
+  const before=all.filter(x=>x<q).at(-1),after=all.find(x=>x>q);
+  if(before===undefined||after===undefined)return Infinity;
+  const left=q-before,right=after-q;
+  if(left<3||right<3)return Infinity;
+  const prev=duties.find(x=>x.q===before),next=duties.find(x=>x.q===after);
+  if((prev&&OPTIONAL_ROLES.includes(prev.role))||(next&&OPTIONAL_ROLES.includes(next.role)))return Infinity;
+  const earlier=all.filter(x=>x<before).at(-1),later=all.find(x=>x>after);
+  if(left===3&&earlier!==undefined&&before-earlier===3)return Infinity;
+  if(right===3&&later!==undefined&&later-after===3)return Infinity;
+  if(left===3&&right===3)return Infinity;
+  const original=gapCost(after-before),replacement=gapCost(left)+gapCost(right);
+  // A new optional duty must improve spacing, not merely increase duty count.
+  let gain=original-replacement-10;
+  const weekly=duties.filter(x=>x.q<35).length;
+  if(slot.day<7&&weekly>=9)gain-=90;
+  if(slot.day<7&&weekly>=8)gain-=25;
+  // Reserve driver is restricted to drivers by eligible(); prefer using
+  // specialists for radio without overriding the spacing benefit.
+  if(slot.role==='radio'&&p.baseRole==='leader')gain-=15;
+  if(slot.role==='radio'&&p.baseRole==='driver')gain-=8;
+  // Avoid adding night shifts solely for balancing counts.
+  if(slot.shift>=3)gain-=6;
+  return gain>0?-gain:Infinity;
  };
- for(let n=0;n<slots.length&&Date.now()-started<budgetMs;n++){
-  let best=null,bestDelta=-0.001;
-  for(const slot of slots){
-   if(occupiedSlots.has(`${slot.day}/${slot.shift}/${slot.role}`))continue;
-   for(const p of people){
-    const delta=deltaFor(p,slot);
-    if(delta<bestDelta){bestDelta=delta;best={slot,p};}
-   }
-  }
+ for(let iteration=0;iteration<80&&Date.now()<deadline;iteration++){
+  let best=null,bestScore=Infinity;
+  for(let day=0;day<8&&Date.now()<deadline;day++)
+   for(let shift=0;shift<5;shift++)
+    for(const role of OPTIONAL_ROLES){
+     const slot={day,shift,role};
+     if(occupied.has(key(slot)))continue;
+     for(const p of people){
+      const value=evaluate(p,slot);
+      if(value<bestScore){bestScore=value;best={p,slot};}
+     }
+    }
   if(!best)break;
-  const {slot,p}=best;
-  roster.push({...slot,personId:p.id});
-  occupiedSlots.add(`${slot.day}/${slot.shift}/${slot.role}`);
-  assignments.get(p.id).push({seq:index(slot),role:slot.role});
-  if(slot.day<7)weekly.set(p.id,weekly.get(p.id)+1);
-  if(slot.day<7&&slot.shift>=3)nights.set(p.id,nights.get(p.id)+1);
+  const a={...best.slot,personId:best.p.id};
+  roster.push(a);occupied.add(key(a));
+  byPerson.get(best.p.id).push({q:seq(a),role:a.role});
  }
  return roster;
 }
