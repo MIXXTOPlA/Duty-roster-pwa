@@ -1,5 +1,5 @@
-import {SHIFTS,REQUIRED_ROLES,OPTIONAL_ROLES,eligible,shiftInterval,allowedBeforeLeave,leaveOutRule} from './model.js';
-import {validateRoster} from './validate.js';
+import {SHIFTS,REQUIRED_ROLES,OPTIONAL_ROLES,eligible,shiftInterval,allowedBeforeLeave,leaveOutRule} from './model.js?v=201';
+import {validateRoster} from './validate.js?v=201';
 import {analyzeFairness} from './metrics.js';
 
 // Whole-roster iterative optimization. Hard constraints are never traded for score.
