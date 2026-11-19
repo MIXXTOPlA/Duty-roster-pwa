@@ -45,9 +45,9 @@ export async function generateRoster(input,{limitMs=60000}={}){
          const n=tally.get(p.id),seqs=occupied.get(p.id),nearest=seqs.length?Math.min(...seqs.map(s=>Math.abs(s-slot.seq))):20;
          const substitution=(slot.role==='rifle'||slot.role==='m60')?(p.baseRole==='rifle'?0:p.baseRole==='driver'?10:20):0;
          const weekly=n>=9?20:0;
-         const threeGap=nearest===3?3:0;
+         const gapPenalty=nearest===3?16:nearest===4?0:nearest===5?3:nearest===6?5:nearest>6?7:0;
          const tie=((p.id.length*31+p.id.charCodeAt(0)*13+attempt*17+slot.seq*7)%19)/19;
-         return n*9+substitution+weekly+threeGap+tie*(attempt%5+1)*2;
+         return n*9+substitution+weekly+gapPenalty+tie*(attempt%5+1)*2;
        };
        return score(a)-score(b)||a.id.localeCompare(b.id);
      });
@@ -90,7 +90,10 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
    st.seqs.sort((a,b)=>a.seq-b.seq);
    for(let i=1;i<st.seqs.length;i++){
     const gap=st.seqs[i].seq-st.seqs[i-1].seq;
-    if(gap===3)total+=2.5;
+    if(gap===3)total+=18;
+    else if(gap===5)total+=3;
+    else if(gap===6)total+=6;
+    else if(gap>6)total+=Math.min(18,7+(gap-7)*2);
     if(i>=2&&st.seqs[i-1].seq-st.seqs[i-2].seq===3&&gap<5&&
       !OPTIONAL_ROLES.includes(st.seqs[i].role))total+=6;
    }
