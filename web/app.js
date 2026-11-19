@@ -28,11 +28,11 @@ function renderStats(){const container=$('stats'),summary=$('stats-summary'),bod
  const byId=new Map(people.map(p=>[p.id,p]));const roleNamesShort={leader:'분대장',driver:'조종수',rifle:'소총수'};
  for(const p of fairness.perPerson){const person=byId.get(p.personId),weekly=assignments.filter(a=>a.personId===p.personId&&a.day<7),all=assignments.filter(a=>a.personId===p.personId);const tr=body.insertRow();const values=[person?.name||p.personId,roleNamesShort[person?.baseRole]||'-',String(p.weekCount),String(all.length),...Array.from({length:5},(_,shift)=>String(weekly.filter(a=>a.shift===shift).length)),String(p.nightCount),(all.reduce((sum,a)=>sum+SHIFTS[a.shift].durationMinutes,0)/60).toFixed(1),String(p.threeGaps)];for(let i=0;i<values.length;i++){const td=tr.insertCell();td.textContent=values[i];if(i===2&&(p.weekCount<8||p.weekCount>9))td.className='stat-warning';}}
 }
-$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=120');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
+$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=121');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
 save.onclick=async()=>{if(!working)return;versions.push({mondayISO:working.mondayISO,savedAt:new Date().toISOString(),snapshot:structuredClone(working)});await writeState();render();status.textContent=`V${versions.length} 저장 완료`};
 $('restore').onclick=async()=>{try{const state=await readState();if(!state){status.textContent='저장된 작업본이 없습니다.';return;}working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;render();status.textContent='기기에 저장된 작업본을 불러왔습니다.';}catch(e){status.textContent='불러오기 실패: '+e}};
-try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.12.0 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
-if(!working)status.textContent='v0.12.0 실행 중 · 자동 편성을 눌러 테스트하세요.';
+try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.12.1 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
+if(!working)status.textContent='v0.12.1 실행 중 · 자동 편성을 눌러 테스트하세요.';
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 function renderPeople(){
  const body=$('people-body'),summary=$('people-summary');if(!body)return;
@@ -109,4 +109,44 @@ $('absence-form').onsubmit=async e=>{
  restrictions.push({id:'A'+(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)),personId,type,start,end});
  if(working)working.restrictions=structuredClone(restrictions);
  await writeState();render();$('absence-status').textContent='일정 저장 완료. 새로 자동 편성하면 반영됩니다.';
+};
+
+function validBackup(data){
+ if(!data||data.format!=='duty-roster-backup-v1'||!Array.isArray(data.people)||!Array.isArray(data.restrictions)||!Array.isArray(data.versions))return false;
+ if(data.people.length>500||data.restrictions.length>5000||data.versions.length>300)return false;
+ const ids=new Set(),names=new Set();
+ for(const p of data.people){
+  if(typeof p.id!=='string'||!p.id||typeof p.name!=='string'||!p.name.trim()||p.name.length>30||!['leader','driver','rifle'].includes(p.baseRole)||!Number.isInteger(p.intake)||ids.has(p.id)||names.has(p.name))return false;
+  ids.add(p.id);names.add(p.name);
+ }
+ for(const r of data.restrictions){
+  if(!ids.has(r.personId)||!['leave','outing'].includes(r.type)||typeof r.start!=='string'||typeof r.end!=='string'||!(Date.parse(r.end)>Date.parse(r.start)))return false;
+ }
+ if(data.working!==null&&data.working!==undefined){
+  if(!Array.isArray(data.working.assignments)||typeof data.working.mondayISO!=='string')return false;
+ }
+ return data.versions.every(v=>v&&v.snapshot&&Array.isArray(v.snapshot.assignments)&&typeof v.mondayISO==='string');
+}
+$('backup-export').onclick=()=>{
+ const payload={format:'duty-roster-backup-v1',exportedAt:new Date().toISOString(),people,restrictions,working,versions};
+ const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+ const url=URL.createObjectURL(blob),link=document.createElement('a');
+ link.href=url;link.download='duty-roster-backup-'+new Date().toISOString().slice(0,10)+'.json';
+ document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);
+ $('backup-status').textContent='백업 파일을 저장했습니다. 파일 앱의 안전한 위치에 보관하세요.';
+};
+$('backup-import').onchange=async e=>{
+ const file=e.target.files?.[0];e.target.value='';if(!file)return;
+ if(file.size>5000000){$('backup-status').textContent='백업 파일이 너무 큽니다 (최대 5MB).';return;}
+ try{
+  const data=JSON.parse(await file.text());
+  if(!validBackup(data))throw Error('지원하지 않거나 잘못된 백업 형식입니다.');
+  if(!confirm('현재 기기에 저장된 인원·일정·근무표·버전을 백업 파일 내용으로 교체할까요?'))return;
+  const old={people,restrictions,working,versions};
+  people=structuredClone(data.people);restrictions=structuredClone(data.restrictions);
+  working=data.working?structuredClone(data.working):null;versions=structuredClone(data.versions);
+  try{await writeState();}catch(err){({people,restrictions,working,versions}=old);throw err;}
+  if(working)monday.value=working.mondayISO;
+  render();$('backup-status').textContent='백업 복원 완료 · 인원 '+people.length+'명';
+ }catch(err){$('backup-status').textContent='복원 실패: '+String(err.message||err);}
 };
