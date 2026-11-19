@@ -97,6 +97,7 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
     else if(gap===5)total+=3;
     else if(gap===6)total+=6;
     else if(gap>6)total+=Math.min(18,7+(gap-7)*2);
+    if(OPTIONAL_ROLES.includes(st.seqs[i-1].role)&&OPTIONAL_ROLES.includes(st.seqs[i].role))total+=1500;
     if(i>=2&&st.seqs[i-1].seq-st.seqs[i-2].seq===3&&gap<5&&
       !OPTIONAL_ROLES.includes(st.seqs[i].role))total+=6;
    }
@@ -139,7 +140,7 @@ function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
  for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++)for(const role of OPTIONAL_ROLES){
   if(!occupiedSlots.has(`${day}/${shift}/${role}`))slots.push({day,shift,role});
  }
- const assignments=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>index(a))]));
+ const assignments=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>({seq:index(a),role:a.role}))]));
  const histories=new Map(people.map(p=>[p.id,[...(history.get(p.id)||[])]]));
  const weekly=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7).length]));
  const nights=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7&&a.shift>=3).length]));
@@ -147,8 +148,12 @@ function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
  const nightTarget=(totalNight+15)/people.length;
  const deltaFor=(p,slot)=>{
   if(!eligible(p,slot.role)||blocked.get(p.id)?.[index(slot)])return Infinity;
-  const seq=index(slot),all=[...assignments.get(p.id),...histories.get(p.id)].sort((a,b)=>a-b);
+  const seq=index(slot),current=assignments.get(p.id),all=[...current.map(a=>a.seq),...histories.get(p.id)].sort((a,b)=>a-b);
   if(all.some(x=>Math.abs(x-seq)<3))return Infinity;
+  const prevDuty=current.filter(a=>a.seq<seq).sort((a,b)=>b.seq-a.seq)[0];
+  const nextDuty=current.filter(a=>a.seq>seq).sort((a,b)=>a.seq-b.seq)[0];
+  // Optional duties are exceptional: do not chain two optional duties for the same person.
+  if((prevDuty&&OPTIONAL_ROLES.includes(prevDuty.role))||(nextDuty&&OPTIONAL_ROLES.includes(nextDuty.role)))return Infinity;
   const before=all.filter(x=>x<seq).at(-1),after=all.find(x=>x>seq);
   let delta=0;
   if(before!==undefined&&after!==undefined)delta-=gapCost(after-before);
@@ -182,7 +187,7 @@ function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
   const {slot,p}=best;
   roster.push({...slot,personId:p.id});
   occupiedSlots.add(`${slot.day}/${slot.shift}/${slot.role}`);
-  assignments.get(p.id).push(index(slot));
+  assignments.get(p.id).push({seq:index(slot),role:slot.role});
   if(slot.day<7)weekly.set(p.id,weekly.get(p.id)+1);
   if(slot.day<7&&slot.shift>=3)nights.set(p.id,nights.get(p.id)+1);
  }
