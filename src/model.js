@@ -28,3 +28,22 @@ export function eligible(person,role){
  return false;
 }
 export function countMinutes(assignments){return assignments.reduce((total,a)=>total+SHIFTS[a.shift].durationMinutes,0);}
+export function leaveOutRule(mondayISO,restrictions=[],personId){
+ const base=Date.parse(mondayISO+'T00:00:00Z');
+ return restrictions.filter(r=>r.personId===personId&&r.type==='leave'&&r.start).map(r=>{
+  const start=Date.parse(r.start+'Z');
+  if(!Number.isFinite(start))return null;
+  const outDay=Math.floor((Date.parse(r.start.slice(0,10)+'T00:00:00Z')-base)/86400000)-1;
+  return {outDay,start};
+ }).filter(Boolean);
+}
+export function allowedBeforeLeave(mondayISO,restrictions,personId,day,shift){
+ // OUT must be the last duty before leave, on the previous calendar day,
+ // in morning/afternoon/evening only. Do not allow earlier assignments to be mislabeled.
+ const q=day*5+shift;
+ for(const rule of leaveOutRule(mondayISO,restrictions,personId)){
+  if(rule.outDay<0||rule.outDay>7)continue;
+  if(q>rule.outDay*5+2&&q<Math.ceil((rule.start-Date.parse(mondayISO+'T00:00:00Z'))/86400000)*5)return false;
+ }
+ return true;
+}
