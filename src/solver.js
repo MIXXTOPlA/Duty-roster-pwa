@@ -86,7 +86,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,
   fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-flex-optional-v4',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'bounded-js-tail-fairness-v5',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
 }
 function balanceRoster(initial,people,blocked,history,started,budgetMs){
@@ -104,9 +104,12 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
    st.hours+=duration(a);if(a.day<7){st.week++;if(a.shift>=3)st.night++;}st.seqs.push({seq:seq(a),role:a.role});}
   let total=0;
   for(const a of roster){if(a.role==='rifle'||a.role==='m60'){const base=byId.get(a.personId)?.baseRole;if(base==='driver')total+=800;else if(base==='leader')total+=1600;}}
-  for(const st of stats.values()){
+  for(const [id,st] of stats){
    total+=12*(st.week-targetWeekly)**2+0.0004*(st.hours-targetHours)**2+8*(st.night-targetNight)**2;
    st.seqs.sort((a,b)=>a.seq-b.seq);
+   // Penalize unexplained disappearance at the end of the planning horizon.
+   const last=st.seqs.length?st.seqs[st.seqs.length-1].seq:-1;
+   if(last>=0){let availableTail=0;for(let q=last+1;q<40;q++)if(!blocked.get(id)?.[q])availableTail++;if(availableTail>6)total+=(availableTail-6)**2*28;}
    for(let i=1;i<st.seqs.length;i++){
     const gap=st.seqs[i].seq-st.seqs[i-1].seq;
     if(gap===3)total+=55;
