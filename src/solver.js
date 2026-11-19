@@ -62,13 +62,16 @@ export async function generateRoster(input,{limitMs=60000}={}){
      if(verified.valid){best=current;completed=true;break;}
    }
  }
- if(completed)best=balanceRoster(best,people,blocked,history,started,Math.min(limitMs,4000));
- // Optional roles deliberately left empty until mandatory roster is verified.
+ if(completed){
+   best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,4000));
+   best=balanceRoster(best,people,blocked,history,started,Math.min(limitMs,4000));
+ }
+ // Optional assignments are accepted only when all hard constraints still pass.
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,
   fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-balanced',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'bounded-js-optional-balanced',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
 }
 function balanceRoster(initial,people,blocked,history,started,budgetMs){
@@ -123,6 +126,65 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
    if(winner){a.personId=winner;bestScore=winnerScore;changes++;improved=true;}
   }
   if(!improved)break;
+ }
+ return roster;
+}
+
+function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
+ const roster=initial.map(a=>({...a})),byId=new Map(people.map(p=>[p.id,p]));
+ const index=a=>a.day*5+a.shift;
+ const gapCost=gap=>gap===4?0:gap===3?32:gap===5?5:gap===6?14:gap===7?25:gap>=8?38+(gap-8)*7:120;
+ const occupiedSlots=new Set(roster.map(a=>`${a.day}/${a.shift}/${a.role}`));
+ const slots=[];
+ for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++)for(const role of OPTIONAL_ROLES){
+  if(!occupiedSlots.has(`${day}/${shift}/${role}`))slots.push({day,shift,role});
+ }
+ const assignments=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>index(a))]));
+ const histories=new Map(people.map(p=>[p.id,[...(history.get(p.id)||[])]]));
+ const weekly=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7).length]));
+ const nights=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id&&a.day<7&&a.shift>=3).length]));
+ const totalNight=roster.filter(a=>a.day<7&&a.shift>=3).length;
+ const nightTarget=(totalNight+15)/people.length;
+ const deltaFor=(p,slot)=>{
+  if(!eligible(p,slot.role)||blocked.get(p.id)?.[index(slot)])return Infinity;
+  const seq=index(slot),all=[...assignments.get(p.id),...histories.get(p.id)].sort((a,b)=>a-b);
+  if(all.some(x=>Math.abs(x-seq)<3))return Infinity;
+  const before=all.filter(x=>x<seq).at(-1),after=all.find(x=>x>seq);
+  let delta=0;
+  if(before!==undefined&&after!==undefined)delta-=gapCost(after-before);
+  if(before!==undefined)delta+=gapCost(seq-before);
+  if(after!==undefined)delta+=gapCost(after-seq);
+  const count=weekly.get(p.id),add=slot.day<7?1:0;
+  delta+=20*((count+add-8.35)**2-(count-8.35)**2);
+  if(add&&count>=9)delta+=60;
+  if(slot.day>=7)delta+=7;
+  if(add&&slot.shift>=3){
+   const n=nights.get(p.id);
+   delta+=4*((n+1-nightTarget)**2-(n-nightTarget)**2);
+  }
+  // Extra optional duties should justify their burden through better spacing/fairness.
+  delta+=7;
+  // Keep reserve-driver assignments for drivers, and prefer rifle specialists for radio.
+  if(slot.role==='radio'&&p.baseRole==='leader')delta+=3;
+  if(slot.role==='radio'&&p.baseRole==='driver')delta+=2;
+  return delta;
+ };
+ for(let n=0;n<slots.length&&Date.now()-started<budgetMs;n++){
+  let best=null,bestDelta=-0.001;
+  for(const slot of slots){
+   if(occupiedSlots.has(`${slot.day}/${slot.shift}/${slot.role}`))continue;
+   for(const p of people){
+    const delta=deltaFor(p,slot);
+    if(delta<bestDelta){bestDelta=delta;best={slot,p};}
+   }
+  }
+  if(!best)break;
+  const {slot,p}=best;
+  roster.push({...slot,personId:p.id});
+  occupiedSlots.add(`${slot.day}/${slot.shift}/${slot.role}`);
+  assignments.get(p.id).push(index(slot));
+  if(slot.day<7)weekly.set(p.id,weekly.get(p.id)+1);
+  if(slot.day<7&&slot.shift>=3)nights.set(p.id,nights.get(p.id)+1);
  }
  return roster;
 }
