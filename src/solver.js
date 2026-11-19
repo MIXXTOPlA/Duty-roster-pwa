@@ -114,7 +114,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-radio-3gap-v11',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-due-optional-v12',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
 }
 function repairUnassigned(initial,people,blocked,available,score,deadline){
@@ -181,6 +181,35 @@ function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions
  const occupied=new Set(roster.map(key));
  const byPerson=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(seq)]));
  const gapCost=g=>g<=4?0:g===5?15:g===6?500:g===7?700:900+(g-8)*130;
+ // Proactively give a due person an optional duty when a required slot went to
+ // someone else. This also covers the last duty in the 8-day horizon.
+ // Existing required duties are never moved, and future duties must stay >=3 apart.
+ const dueCandidates=[];
+ for(const p of people){
+  const all=[...byPerson.get(p.id),...(history.get(p.id)||[])].sort((a,b)=>a-b);
+  for(let q=0;q<40;q++){
+   const before=all.filter(x=>x<q).at(-1),after=all.find(x=>x>q);
+   if(before===undefined||q-before!==4||after!==undefined&&after-q<3)continue;
+   if(after!==undefined&&after-before<=6)continue;
+   if(blocked.get(p.id)[q]||!allowedBeforeLeave(mondayISO,restrictions,p.id,Math.floor(q/5),q%5))continue;
+   for(const role of (p.baseRole==='driver'?['radio','reserveDriver']:['radio'])){
+    const slot={day:Math.floor(q/5),shift:q%5,role};
+    if(!occupied.has(key(slot)))dueCandidates.push({p,slot,q,next:after??Infinity});
+   }
+  }
+ }
+ dueCandidates.sort((a,b)=>(b.next-b.q)-(a.next-a.q)||a.q-b.q);
+ for(const {p,slot,q} of dueCandidates){
+  if(Date.now()>=deadline)break;
+  if(occupied.has(key(slot)))continue;
+  const all=[...byPerson.get(p.id),...(history.get(p.id)||[])];
+  if(all.some(x=>Math.abs(x-q)<3))continue;
+  const prev=all.filter(x=>x<q).sort((a,b)=>b-a)[0];
+  const next=all.filter(x=>x>q).sort((a,b)=>a-b)[0];
+  if(prev===undefined||q-prev!==4||next!==undefined&&next-q<3)continue;
+  const a={...slot,personId:p.id};
+  roster.push(a);occupied.add(key(a));byPerson.get(p.id).push(q);
+ }
  const evaluate=(p,slot)=>{
   const q=seq(slot);
   if(!eligible(p,slot.role)||blocked.get(p.id)[q]||
