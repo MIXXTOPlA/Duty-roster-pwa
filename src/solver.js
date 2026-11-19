@@ -60,10 +60,10 @@ export async function generateRoster(input,{limitMs=60000}={}){
     const prev=all[i-1],cur=all[i],gap=cur.q-prev.q;
     // Do not penalize gaps mostly caused by leave.
     let free=0;for(let q=prev.q+1;q<cur.q&&q>=0&&q<40;q++)if(!blocked.get(p.id)[q])free++;
-    if(gap===3)total+=85;
-    else if(gap===4){}else if(gap===5)total+=9;
-    else if(gap===6)total+=35;
-    else if(gap>6&&free>=5)total+=75+(gap-7)*30;
+    if(gap===3)total+=60;
+    else if(gap===4){}else if(gap===5)total+=110;
+    else if(gap===6)total+=145;
+    else if(gap>6&&free>=5)total+=175+(gap-7)*45;
     if(i>=2&&gap===3&&prev.q-all[i-2].q===3)total+=850;
     if(i>=2&&gap===5&&prev.q-all[i-2].q===3)total-=12;
    }
@@ -87,7 +87,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
     const base=substitution(p,slot.role);
     // Rotate early: penalize first duty occurring late even with no previous duty.
     const idle=previous.length?Math.max(0,gap-5):Math.max(0,q-4);
-    const gapCost=gap===4?0:gap===3?85:gap===5?9:gap===6?35:gap>6?75+(gap-7)*30:0;
+    const gapCost=gap===4?0:gap===3?60:gap===5?110:gap===6?145:gap>6?175+(gap-7)*45:0;
     const tie=((p.id.length*19+p.id.charCodeAt(0)*7+attempt*31+q*13)%31)/31;
     const outBonus=leaveOutRule(input.mondayISO,input.restrictions||[],p.id).some(r=>r.outDay===slot.day&&slot.shift<=2)?-3000:0;
     return base+outBonus+gapCost+idle*idle*35+(consecutive?850:0)+(counts.get(p.id)||0)*9+tie*(attempt%7+1)*2;
@@ -114,7 +114,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-flex-optional-v9',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-radio-first-v10',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
 }
 function repairUnassigned(initial,people,blocked,available,score,deadline){
@@ -180,7 +180,7 @@ function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions
  const key=a=>a.day+'/'+a.shift+'/'+a.role;
  const occupied=new Set(roster.map(key));
  const byPerson=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>({q:seq(a),role:a.role}))]));
- const gapCost=g=>g===4?0:g===3?35:g===5?8:g===6?28:g===7?75:g>=8?120+(g-8)*35:500;
+ const gapCost=g=>g===4?0:g===3?35:g===5?110:g===6?165:g===7?225:g>=8?290+(g-8)*55:500;
  const evaluate=(p,slot)=>{
   if(!eligible(p,slot.role)||blocked.get(p.id)[seq(slot)]||
     !allowedBeforeLeave(mondayISO,restrictions,p.id,slot.day,slot.shift))return Infinity;
@@ -199,14 +199,15 @@ function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions
   if(left===3&&right===3)return Infinity;
   const original=gapCost(after-before),replacement=gapCost(left)+gapCost(right);
   // A new optional duty must improve spacing, not merely increase duty count.
-  let gain=original-replacement-10;
+  let gain=original-replacement-5;
   const weekly=duties.filter(x=>x.q<35).length;
   if(slot.day<7&&weekly>=9)gain-=90;
   if(slot.day<7&&weekly>=8)gain-=25;
   // Reserve driver is restricted to drivers by eligible(); prefer using
   // specialists for radio without overriding the spacing benefit.
   if(slot.role==='radio'&&p.baseRole==='leader')gain-=15;
-  if(slot.role==='radio'&&p.baseRole==='driver')gain-=8;
+  if(slot.role==='radio'&&p.baseRole==='driver')gain-=3;
+  if(slot.role==='radio')gain+=12;
   // Avoid adding night shifts solely for balancing counts.
   if(slot.shift>=3)gain-=6;
   return gain>0?-gain:Infinity;
