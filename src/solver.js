@@ -114,7 +114,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-radio-first-v10',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-radio-3gap-v11',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
 }
 function repairUnassigned(initial,people,blocked,available,score,deadline){
@@ -173,50 +173,43 @@ function optimize(roster,people,available,score,deadline){
  return roster;
 }
 function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions,deadline){
- // Fill optional positions only after required assignments are complete.
- // Optional duties can have 3-shift gaps, but must never displace required duties.
+ // Radio is a flexible bridging duty: 3+3 and repeated optional duties are allowed.
+ // Never violate role, leave, OUT or the global minimum 3-shift gap.
  const roster=initial.map(a=>({...a}));
  const seq=a=>a.day*5+a.shift;
  const key=a=>a.day+'/'+a.shift+'/'+a.role;
  const occupied=new Set(roster.map(key));
- const byPerson=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(a=>({q:seq(a),role:a.role}))]));
- const gapCost=g=>g===4?0:g===3?35:g===5?110:g===6?165:g===7?225:g>=8?290+(g-8)*55:500;
+ const byPerson=new Map(people.map(p=>[p.id,roster.filter(a=>a.personId===p.id).map(seq)]));
+ const gapCost=g=>g<=4?0:g===5?15:g===6?500:g===7?700:900+(g-8)*130;
  const evaluate=(p,slot)=>{
-  if(!eligible(p,slot.role)||blocked.get(p.id)[seq(slot)]||
-    !allowedBeforeLeave(mondayISO,restrictions,p.id,slot.day,slot.shift))return Infinity;
-  const q=seq(slot),duties=byPerson.get(p.id);
-  const all=[...duties.map(x=>x.q),...(history.get(p.id)||[])].sort((a,b)=>a-b);
+  const q=seq(slot);
+  if(!eligible(p,slot.role)||blocked.get(p.id)[q]||
+     !allowedBeforeLeave(mondayISO,restrictions,p.id,slot.day,slot.shift))return Infinity;
+  const duties=byPerson.get(p.id);
+  const all=[...duties,...(history.get(p.id)||[])].sort((a,b)=>a-b);
   if(all.some(x=>Math.abs(x-q)<3))return Infinity;
   const before=all.filter(x=>x<q).at(-1),after=all.find(x=>x>q);
   if(before===undefined||after===undefined)return Infinity;
   const left=q-before,right=after-q;
   if(left<3||right<3)return Infinity;
-  const prev=duties.find(x=>x.q===before),next=duties.find(x=>x.q===after);
-  if((prev&&OPTIONAL_ROLES.includes(prev.role))||(next&&OPTIONAL_ROLES.includes(next.role)))return Infinity;
-  const earlier=all.filter(x=>x<before).at(-1),later=all.find(x=>x>after);
-  if(left===3&&earlier!==undefined&&before-earlier===3)return Infinity;
-  if(right===3&&later!==undefined&&later-after===3)return Infinity;
-  if(left===3&&right===3)return Infinity;
-  const original=gapCost(after-before),replacement=gapCost(left)+gapCost(right);
-  // A new optional duty must improve spacing, not merely increase duty count.
-  let gain=original-replacement-5;
-  const weekly=duties.filter(x=>x.q<35).length;
-  if(slot.day<7&&weekly>=9)gain-=90;
-  if(slot.day<7&&weekly>=8)gain-=25;
-  // Reserve driver is restricted to drivers by eligible(); prefer using
-  // specialists for radio without overriding the spacing benefit.
-  if(slot.role==='radio'&&p.baseRole==='leader')gain-=15;
-  if(slot.role==='radio'&&p.baseRole==='driver')gain-=3;
-  if(slot.role==='radio')gain+=12;
-  // Avoid adding night shifts solely for balancing counts.
-  if(slot.shift>=3)gain-=6;
+  const gap=after-before;
+  // Do not add optional duties to a 5-shift interval: it cannot be split safely.
+  if(gap<6)return Infinity;
+  let gain=gapCost(gap)-gapCost(left)-gapCost(right);
+  // Strongly prefer radio for bridging, even when it creates consecutive 3-gaps.
+  if(slot.role==='radio')gain+=40;
+  else gain+=5;
+  // Do not overschedule an already heavily assigned person unless a long gap is repaired.
+  const weekly=duties.filter(x=>x<35).length;
+  if(slot.day<7&&weekly>=10)gain-=150;
+  if(slot.day<7&&weekly>=9)gain-=50;
   return gain>0?-gain:Infinity;
  };
  for(let iteration=0;iteration<80&&Date.now()<deadline;iteration++){
   let best=null,bestScore=Infinity;
   for(let day=0;day<8&&Date.now()<deadline;day++)
    for(let shift=0;shift<5;shift++)
-    for(const role of OPTIONAL_ROLES){
+    for(const role of ['radio','reserveDriver']){
      const slot={day,shift,role};
      if(occupied.has(key(slot)))continue;
      for(const p of people){
@@ -226,8 +219,7 @@ function fillOptionalSlots(initial,people,blocked,history,mondayISO,restrictions
     }
   if(!best)break;
   const a={...best.slot,personId:best.p.id};
-  roster.push(a);occupied.add(key(a));
-  byPerson.get(best.p.id).push({q:seq(a),role:a.role});
+  roster.push(a);occupied.add(key(a));byPerson.get(best.p.id).push(seq(a));
  }
  return roster;
 }
