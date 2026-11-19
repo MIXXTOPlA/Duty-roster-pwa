@@ -40,18 +40,31 @@ export async function generateRoster(input,{limitMs=60000}={}){
    for(const slot of slots){
      const options=people.filter(p=>eligible(p,slot.role)&&!blocked.get(p.id)[slot.seq]&&occupied.get(p.id).every(s=>Math.abs(s-slot.seq)>=3));
      if(!options.length)break;
-     options.sort((a,b)=>{
+     // Role substitution is exceptional, not a soft fairness preference.
+     // Rifle at 4+ gaps > driver at 4+ > leader at 4+ > rifle at 3.
+     // A driver/leader at gap 3 may never substitute for a rifle specialist.
+     const gapOf=p=>Math.min(20,...occupied.get(p.id).map(s=>Math.abs(s-slot.seq)));
+     const isRifleSlot=slot.role==='rifle'||slot.role==='m60';
+     const tier=p=>{
+       if(!isRifleSlot)return gapOf(p)>=4?0:1;
+       const gap=gapOf(p);
+       if(p.baseRole==='rifle')return gap>=4?0:3;
+       if(gap<4)return 10;
+       return p.baseRole==='driver'?1:2;
+     };
+     const minTier=Math.min(...options.map(tier));
+     const preferred=options.filter(p=>tier(p)===minTier);
+     preferred.sort((a,b)=>{
        const score=p=>{
-         const n=tally.get(p.id),seqs=occupied.get(p.id),nearest=seqs.length?Math.min(...seqs.map(s=>Math.abs(s-slot.seq))):20;
-         const substitution=(slot.role==='rifle'||slot.role==='m60')?(p.baseRole==='rifle'?0:p.baseRole==='driver'?10:20):0;
+         const n=tally.get(p.id),nearest=gapOf(p);
          const weekly=n>=9?20:0;
          const gapPenalty=nearest===3?16:nearest===4?0:nearest===5?3:nearest===6?5:nearest>6?7:0;
          const tie=((p.id.length*31+p.id.charCodeAt(0)*13+attempt*17+slot.seq*7)%19)/19;
-         return n*9+substitution+weekly+gapPenalty+tie*(attempt%5+1)*2;
+         return n*9+weekly+gapPenalty+tie*(attempt%5+1)*2;
        };
        return score(a)-score(b)||a.id.localeCompare(b.id);
      });
-     const pick=options[(attempt%11===0&&options.length>1)?1:0];
+     const pick=preferred[(attempt%11===0&&preferred.length>1)?1:0];
      current.push({day:slot.day,shift:slot.shift,role:slot.role,personId:pick.id});
      occupied.get(pick.id).push(slot.seq);
      tally.set(pick.id,tally.get(pick.id)+1);
@@ -71,7 +84,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,
   fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-optional-balanced',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'bounded-js-role-priority-v2',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
 }
 function balanceRoster(initial,people,blocked,history,started,budgetMs){
@@ -88,7 +101,7 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
   for(const a of roster){const st=stats.get(a.personId);if(!st)continue;
    st.hours+=duration(a);if(a.day<7){st.week++;if(a.shift>=3)st.night++;}st.seqs.push({seq:seq(a),role:a.role});}
   let total=0;
-  for(const st of stats.values()){
+  for(const a of roster){if(a.role==='rifle'||a.role==='m60'){const base=byId.get(a.personId)?.baseRole;if(base==='driver')total+=450;else if(base==='leader')total+=900;}}\n  for(const st of stats.values()){
    total+=12*(st.week-targetWeekly)**2+0.0004*(st.hours-targetHours)**2+8*(st.night-targetNight)**2;
    st.seqs.sort((a,b)=>a.seq-b.seq);
    for(let i=1;i<st.seqs.length;i++){
