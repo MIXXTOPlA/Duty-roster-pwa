@@ -62,11 +62,64 @@ export async function generateRoster(input,{limitMs=60000}={}){
      if(verified.valid){best=current;completed=true;break;}
    }
  }
+ if(completed)best=balanceRoster(best,people,blocked,history,started,Math.min(limitMs,4000));
  // Optional roles deliberately left empty until mandatory roster is verified.
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,
   fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-greedy',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'bounded-js-balanced',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
+}
+function balanceRoster(initial,people,blocked,history,started,budgetMs){
+ const roster=initial.map(a=>({...a})), byId=new Map(people.map(p=>[p.id,p]));
+ const duration=a=>SHIFTS[a.shift].durationMinutes;
+ const seq=a=>a.day*5+a.shift;
+ const fixed=new Set(roster.map((a,i)=>a.locked?i:-1).filter(i=>i>=0));
+ const ids=people.map(p=>p.id);
+ const targetWeekly=roster.filter(a=>a.day<7).length/Math.max(1,people.length);
+ const targetHours=roster.reduce((s,a)=>s+duration(a),0)/Math.max(1,people.length);
+ const targetNight=roster.filter(a=>a.day<7&&a.shift>=3).length/Math.max(1,people.length);
+ function score(){
+  const stats=new Map(ids.map(id=>[id,{week:0,hours:0,night:0,seqs:[]}]));
+  for(const a of roster){const st=stats.get(a.personId);if(!st)continue;
+   st.hours+=duration(a);if(a.day<7){st.week++;if(a.shift>=3)st.night++;}st.seqs.push({seq:seq(a),role:a.role});}
+  let total=0;
+  for(const st of stats.values()){
+   total+=12*(st.week-targetWeekly)**2+0.0004*(st.hours-targetHours)**2+8*(st.night-targetNight)**2;
+   st.seqs.sort((a,b)=>a.seq-b.seq);
+   for(let i=1;i<st.seqs.length;i++){
+    const gap=st.seqs[i].seq-st.seqs[i-1].seq;
+    if(gap===3)total+=2.5;
+    if(i>=2&&st.seqs[i-1].seq-st.seqs[i-2].seq===3&&gap<5&&
+      !OPTIONAL_ROLES.includes(st.seqs[i].role))total+=6;
+   }
+  }
+  return total;
+ }
+ function allowed(personId,slot,skipA,skipB){
+  const p=byId.get(personId),index=seq(slot);
+  if(!p||!eligible(p,slot.role)||blocked.get(personId)?.[index])return false;
+  if((history.get(personId)||[]).some(n=>Math.abs(n-index)<3))return false;
+  return roster.every((a,i)=>i===skipA||i===skipB||a.personId!==personId||Math.abs(seq(a)-index)>=3);
+ }
+ let bestScore=score(),changes=0;
+ for(let pass=0;pass<5&&Date.now()-started<budgetMs;pass++){
+  let improved=false;
+  for(let i=0;i<roster.length&&Date.now()-started<budgetMs;i++){
+   if(fixed.has(i))continue;
+   const a=roster[i],oldId=a.personId;
+   let winner=null,winnerScore=bestScore;
+   for(const p of people){
+    if(p.id===oldId||!allowed(p.id,a,i,-1))continue;
+    a.personId=p.id;
+    const candidate=score();
+    if(candidate<winnerScore-0.0001){winnerScore=candidate;winner=p.id;}
+    a.personId=oldId;
+   }
+   if(winner){a.personId=winner;bestScore=winnerScore;changes++;improved=true;}
+  }
+  if(!improved)break;
+ }
+ return roster;
 }
