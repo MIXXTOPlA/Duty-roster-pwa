@@ -2,168 +2,143 @@ import {SHIFTS,REQUIRED_ROLES,OPTIONAL_ROLES,eligible,shiftInterval} from './mod
 import {validateRoster} from './validate.js';
 import {analyzeFairness} from './metrics.js';
 
-// Fast, bounded baseline scheduler. Not a mathematical optimizer.
+// Whole-roster iterative optimization. Hard constraints are never traded for score.
 export async function generateRoster(input,{limitMs=60000}={}){
- const started=Date.now();
+ const started=Date.now(),deadline=started+Math.min(limitMs,14000);
  if(!input||!Array.isArray(input.people)||!Array.isArray(input.assignments||[])||!Array.isArray(input.restrictions||[])||!Array.isArray(input.history||[]))throw Error('잘못된 입력');
  const monday=new Date(input.mondayISO+'T00:00:00Z');
  if(!Number.isFinite(monday.getTime())||monday.getUTCDay()!==1)throw Error('월요일 날짜가 필요합니다');
  const people=input.people,byId=new Map(people.map(p=>[p.id,p]));
  const fixed=(input.assignments||[]).map(a=>({...a,locked:true}));
- const fixedCheck=validateRoster({...input,assignments:fixed});
- if(fixedCheck.errors.length)throw Error('고정 근무 또는 입력 제약이 충돌합니다: '+fixedCheck.errors[0].code);
+ const check=validateRoster({...input,assignments:fixed});
+ if(check.errors.length)throw Error('고정 근무 충돌: '+check.errors[0].code);
+ const intervals=Array.from({length:40},(_,q)=>shiftInterval(new Date(monday.getTime()+Math.floor(q/5)*86400000).toISOString().slice(0,10),SHIFTS[q%5].id));
+ const blocked=new Map(people.map(p=>[p.id,intervals.map(iv=>(input.restrictions||[]).some(r=>{
+  if(r.personId!==p.id)return false;
+  const a=Date.parse(r.start+'Z'),b=Date.parse(r.end+'Z');
+  return Number.isFinite(a)&&Number.isFinite(b)&&iv.start<b&&a<iv.end;
+ }))]));
+ const history=new Map(people.map(p=>[p.id,(input.history||[]).filter(h=>h.personId===p.id&&Number.isInteger(h.seq)).map(h=>h.seq)]));
  const slots=[];
  for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++)for(const role of REQUIRED_ROLES)
-   if(!fixed.some(a=>a.day===day&&a.shift===shift&&a.role===role))slots.push({day,shift,role,seq:day*5+shift});
- const restrictions=input.restrictions||[];
- const intervals=Array.from({length:40},(_,seq)=>{
-   const day=Math.floor(seq/5),shift=seq%5;
-   const date=new Date(monday.getTime()+day*86400000).toISOString().slice(0,10);
-   return shiftInterval(date,SHIFTS[shift].id);
- });
- const blocked=new Map(people.map(p=>[p.id,intervals.map(iv=>restrictions.some(r=>{
-   if(r.personId!==p.id)return false;
-   const a=Date.parse(r.start+'Z'),b=Date.parse(r.end+'Z');
-   return Number.isFinite(a)&&Number.isFinite(b)&&iv.start<b&&a<iv.end;
- }))]));
- const history=new Map(people.map(p=>[p.id,(input.history||[]).filter(h=>h.personId===p.id).map(h=>h.seq)]));
- const counts=new Map(people.map(p=>[p.id,0]));
- let best=fixed,completed=false,attempts=0;
- const deadline=started+Math.min(limitMs,10000);
- for(let attempt=0;attempt<320&&Date.now()<deadline;attempt++){
-   attempts++;
-   const current=fixed.map(a=>({...a}));
-   const occupied=new Map(people.map(p=>[p.id,[...history.get(p.id)]]));
-   const tally=new Map(counts);
-   for(const a of fixed){occupied.get(a.personId)?.push(a.day*5+a.shift);tally.set(a.personId,(tally.get(a.personId)||0)+1);}
-   // Vary tie breaks between attempts without unbounded backtracking.
-   for(const slot of slots){
-     const options=people.filter(p=>eligible(p,slot.role)&&!blocked.get(p.id)[slot.seq]&&occupied.get(p.id).every(s=>Math.abs(s-slot.seq)>=3));
-     if(!options.length)break;
-     // Role substitution is exceptional, not a soft fairness preference.
-     // Rifle at 4+ gaps > driver at 4+ > leader at 4+ > rifle at 3.
-     // A driver/leader at gap 3 may never substitute for a rifle specialist.
-     const gapOf=p=>Math.min(20,...occupied.get(p.id).map(s=>Math.abs(s-slot.seq)));
-     const isRifleSlot=slot.role==='rifle'||slot.role==='m60';
-     const tier=p=>{
-       if(!isRifleSlot)return gapOf(p)>=4?0:1;
-       const gap=gapOf(p);
-       if(p.baseRole==='rifle')return gap>=4?0:3;
-       if(gap<4)return 10;
-       return p.baseRole==='driver'?1:2;
-     };
-     const minTier=Math.min(...options.map(tier));
-     const preferred=options.filter(p=>tier(p)===minTier);
-     preferred.sort((a,b)=>{
-       const score=p=>{
-         const n=tally.get(p.id),nearest=gapOf(p);
-         const weekly=n>=9?20:0;
-         const previous=[...occupied.get(p.id)].filter(x=>x<slot.seq).sort((a,b)=>b-a);
-         const consecutiveThree=previous.length>=2&&slot.seq-previous[0]===3&&previous[0]-previous[1]===3;
-         const gapPenalty=consecutiveThree?120:nearest===3?28:nearest===4?0:nearest===5?4:nearest===6?9:nearest>6?15:0;
-         const tie=((p.id.length*31+p.id.charCodeAt(0)*13+attempt*17+slot.seq*7)%19)/19;
-         return n*9+weekly+gapPenalty+tie*(attempt%5+1)*2;
-       };
-       return score(a)-score(b)||a.id.localeCompare(b.id);
-     });
-     const pick=preferred[(attempt%11===0&&preferred.length>1)?1:0];
-     current.push({day:slot.day,shift:slot.shift,role:slot.role,personId:pick.id});
-     occupied.get(pick.id).push(slot.seq);
-     tally.set(pick.id,tally.get(pick.id)+1);
-   }
-   if(current.length>best.length)best=current;
-   if(current.length===fixed.length+slots.length){
-     const verified=validateRoster({...input,assignments:current});
-     if(verified.valid){best=current;completed=true;break;}
-   }
- }
- if(completed){
-   best=balanceRoster(best,people,blocked,history,started,Math.min(limitMs,10000));
-   best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,10000));
- }
- // Optional assignments are accepted only when all hard constraints still pass.
- const validation=validateRoster({...input,assignments:best});
- const status=completed&&validation.valid?'complete':'partial';
- return {status,assignments:best,validation,
-  fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-tail-fairness-v5',optimal:false,attempts,elapsedMs:Date.now()-started,
-  message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
-}
-function balanceRoster(initial,people,blocked,history,started,budgetMs){
- const roster=initial.map(a=>({...a})), byId=new Map(people.map(p=>[p.id,p]));
- const duration=a=>SHIFTS[a.shift].durationMinutes;
+  if(!fixed.some(a=>a.day===day&&a.shift===shift&&a.role===role))slots.push({day,shift,role});
  const seq=a=>a.day*5+a.shift;
- const fixed=new Set(roster.map((a,i)=>a.locked?i:-1).filter(i=>i>=0));
- const ids=people.map(p=>p.id);
- const targetWeekly=roster.filter(a=>a.day<7).length/Math.max(1,people.length);
- const targetHours=roster.reduce((s,a)=>s+duration(a),0)/Math.max(1,people.length);
- const targetNight=roster.filter(a=>a.day<7&&a.shift>=3).length/Math.max(1,people.length);
- function score(){
-  const stats=new Map(ids.map(id=>[id,{week:0,hours:0,night:0,seqs:[]}]));
-  for(const a of roster){const st=stats.get(a.personId);if(!st)continue;
-   st.hours+=duration(a);if(a.day<7){st.week++;if(a.shift>=3)st.night++;}st.seqs.push({seq:seq(a),role:a.role});}
+ const substitution=(p,role)=>role==='rifle'||role==='m60'?(p.baseRole==='rifle'?0:p.baseRole==='driver'?900:1800):0;
+ const available=(p,a,roster,skip1=-1,skip2=-1)=>{
+  const q=seq(a);
+  return eligible(p,a.role)&&!blocked.get(p.id)[q]&&
+   !(history.get(p.id)||[]).some(x=>Math.abs(x-q)<3)&&
+   roster.every((x,i)=>i===skip1||i===skip2||x.personId!==p.id||Math.abs(seq(x)-q)>=3);
+ };
+ const score=roster=>{
+  const grouped=new Map(people.map(p=>[p.id,[...(history.get(p.id)||[]).filter(q=>q<0).map(q=>({q,role:'history'}))]]));
   let total=0;
-  for(const a of roster){if(a.role==='rifle'||a.role==='m60'){const base=byId.get(a.personId)?.baseRole;if(base==='driver')total+=800;else if(base==='leader')total+=1600;}}
-  for(const [id,st] of stats){
-   total+=12*(st.week-targetWeekly)**2+0.0004*(st.hours-targetHours)**2+8*(st.night-targetNight)**2;
-   st.seqs.sort((a,b)=>a.seq-b.seq);
-   // Penalize unexplained disappearance at the end of the planning horizon.
-   const last=st.seqs.length?st.seqs[st.seqs.length-1].seq:-1;
-   if(last>=0){let availableTail=0;for(let q=last+1;q<40;q++)if(!blocked.get(id)?.[q])availableTail++;if(availableTail>6)total+=(availableTail-6)**2*28;}
-   for(let i=1;i<st.seqs.length;i++){
-    const gap=st.seqs[i].seq-st.seqs[i-1].seq;
-    if(gap===3)total+=55;
-    else if(gap===5)total+=5;
-    else if(gap===6)total+=20;
-    else if(gap>6)total+=65+(gap-7)*20;
-    if(OPTIONAL_ROLES.includes(st.seqs[i-1].role)&&OPTIONAL_ROLES.includes(st.seqs[i].role))total+=1500;
-    if(i>=2&&st.seqs[i-1].seq-st.seqs[i-2].seq===3&&gap===3)total+=500;
-    if(i>=2&&st.seqs[i-1].seq-st.seqs[i-2].seq===3&&gap===5)total-=12;
+  for(const a of roster){grouped.get(a.personId)?.push({q:seq(a),role:a.role});total+=substitution(byId.get(a.personId),a.role);}
+  const target=roster.filter(a=>a.day<7).length/Math.max(1,people.length);
+  for(const p of people){
+   const all=grouped.get(p.id).sort((a,b)=>a.q-b.q);
+   const within=all.filter(x=>x.q>=0);
+   const count=within.filter(x=>x.q<35).length;
+   total+=12*(count-target)**2;
+   const first=within[0]?.q,last=within.at(-1)?.q;
+   // An available person must not disappear at the start or end.
+   if(first!==undefined){
+    let prefix=0;for(let q=0;q<first;q++)if(!blocked.get(p.id)[q])prefix++;
+    if(prefix>5)total+=45*(prefix-5)**2;
+    let suffix=0;for(let q=last+1;q<40;q++)if(!blocked.get(p.id)[q])suffix++;
+    if(suffix>5)total+=45*(suffix-5)**2;
+   }else{
+    const availableCount=blocked.get(p.id).filter(x=>!x).length;
+    if(availableCount>=8)total+=5000;
+   }
+   for(let i=1;i<all.length;i++){
+    const prev=all[i-1],cur=all[i],gap=cur.q-prev.q;
+    // Do not penalize gaps mostly caused by leave.
+    let free=0;for(let q=prev.q+1;q<cur.q&&q>=0&&q<40;q++)if(!blocked.get(p.id)[q])free++;
+    if(gap===3)total+=85;
+    else if(gap===4){}else if(gap===5)total+=9;
+    else if(gap===6)total+=35;
+    else if(gap>6&&free>=5)total+=75+(gap-7)*30;
+    if(i>=2&&gap===3&&prev.q-all[i-2].q===3)total+=850;
+    if(i>=2&&gap===5&&prev.q-all[i-2].q===3)total-=12;
    }
   }
   return total;
- }
- function allowed(personId,slot,skipA,skipB){
-  const p=byId.get(personId),index=seq(slot);
-  if(!p||!eligible(p,slot.role)||blocked.get(personId)?.[index])return false;
-  if((history.get(personId)||[]).some(n=>Math.abs(n-index)<3))return false;
-  return roster.every((a,i)=>i===skipA||i===skipB||a.personId!==personId||Math.abs(seq(a)-index)>=3);
- }
- let bestScore=score(),changes=0;
- for(let pass=0;pass<8&&Date.now()-started<budgetMs;pass++){
-  let improved=false;
-  for(let i=0;i<roster.length&&Date.now()-started<budgetMs;i++){
-   if(fixed.has(i))continue;
-   const a=roster[i],oldId=a.personId;
-   let winner=null,winnerScore=bestScore;
-   for(const p of people){
-    if(p.id===oldId||!allowed(p.id,a,i,-1))continue;
-    a.personId=p.id;
-    const candidate=score();
-    if(candidate<winnerScore-0.0001){winnerScore=candidate;winner=p.id;}
-    a.personId=oldId;
-   }
-   if(winner){a.personId=winner;bestScore=winnerScore;changes++;improved=true;}
+ };
+ let best=fixed,completed=false,attempts=0,bestScore=Infinity;
+ for(let attempt=0;attempt<100&&Date.now()<deadline;attempt++){
+  attempts++;
+  const roster=fixed.map(a=>({...a}));
+  const occupied=new Map(people.map(p=>[p.id,[...history.get(p.id),...fixed.filter(a=>a.personId===p.id).map(seq)]]));
+  const counts=new Map(people.map(p=>[p.id,fixed.filter(a=>a.personId===p.id).length]));
+  for(const slot of slots){
+   const q=seq(slot);
+   const options=people.filter(p=>available(p,slot,roster));
+   if(!options.length)break;
+   const priority=p=>{
+    const previous=occupied.get(p.id).filter(x=>x<q).sort((a,b)=>b-a);
+    const gap=previous.length?q-previous[0]:4;
+    const consecutive=previous.length>1&&gap===3&&previous[0]-previous[1]===3;
+    const base=substitution(p,slot.role);
+    // Rotate early: penalize first duty occurring late even with no previous duty.
+    const idle=previous.length?Math.max(0,gap-5):Math.max(0,q-4);
+    const gapCost=gap===4?0:gap===3?85:gap===5?9:gap===6?35:gap>6?75+(gap-7)*30:0;
+    const tie=((p.id.length*19+p.id.charCodeAt(0)*7+attempt*31+q*13)%31)/31;
+    return base+gapCost+idle*idle*35+(consecutive?850:0)+(counts.get(p.id)||0)*9+tie*(attempt%7+1)*2;
+   };
+   options.sort((a,b)=>priority(a)-priority(b)||a.id.localeCompare(b.id));
+   const pick=options[0];
+   roster.push({...slot,personId:pick.id});
+   occupied.get(pick.id).push(q);counts.set(pick.id,counts.get(pick.id)+1);
   }
-  // Pair swaps can improve a roster when no single reassignment is beneficial.
-  for(let i=0;i<roster.length&&Date.now()-started<budgetMs;i++){
-   if(fixed.has(i))continue;
-   for(let j=i+1;j<roster.length&&Date.now()-started<budgetMs;j++){
-    if(fixed.has(j)||roster[i].personId===roster[j].personId)continue;
+  if(roster.length>best.length&&!completed)best=roster;
+  if(roster.length!==fixed.length+slots.length)continue;
+  const valid=validateRoster({...input,assignments:roster});
+  if(!valid.valid)continue;
+  completed=true;
+  const improved=optimize(roster,people,available,score,deadline);
+  const value=score(improved);
+  if(value<bestScore){best=improved;bestScore=value;}
+ }
+ if(completed)best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,14000));
+ const validation=validateRoster({...input,assignments:best});
+ const status=completed&&validation.valid?'complete':'partial';
+ return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
+  engine:'whole-roster-local-search-v6',optimal:false,attempts,elapsedMs:Date.now()-started,
+  message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
+}
+function optimize(roster,people,available,score,deadline){
+ let best=score(roster);
+ for(let pass=0;pass<12&&Date.now()<deadline;pass++){
+  let changed=false;
+  for(let i=0;i<roster.length&&Date.now()<deadline;i++){
+   if(roster[i].locked)continue;
+   const a=roster[i],original=a.personId;
+   for(const p of people){
+    if(p.id===original||!available(p,a,roster,i))continue;
+    a.personId=p.id;const value=score(roster);
+    if(value<best-0.001){best=value;changed=true;break;}
+    a.personId=original;
+   }
+  }
+  // Exchange two slots, including cross-role exchanges, if both remain eligible.
+  for(let i=0;i<roster.length&&Date.now()<deadline;i++){
+   if(roster[i].locked)continue;
+   for(let j=i+1;j<roster.length&&Date.now()<deadline;j++){
+    if(roster[j].locked||roster[i].personId===roster[j].personId)continue;
     const a=roster[i],b=roster[j],aid=a.personId,bid=b.personId;
-    if(!allowed(bid,a,i,j)||!allowed(aid,b,i,j))continue;
+    if(!available(people.find(p=>p.id===bid),a,roster,i,j)||!available(people.find(p=>p.id===aid),b,roster,i,j))continue;
     a.personId=bid;b.personId=aid;
-    const candidate=score();
-    if(candidate<bestScore-0.0001){bestScore=candidate;improved=true;break;}
+    const value=score(roster);
+    if(value<best-0.001){best=value;changed=true;break;}
     a.personId=aid;b.personId=bid;
    }
-   if(improved)break;
+   if(changed)break;
   }
-  if(!improved)break;
+  if(!changed)break;
  }
  return roster;
 }
-
 function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
  const roster=initial.map(a=>({...a})),byId=new Map(people.map(p=>[p.id,p]));
  const index=a=>a.day*5+a.shift;
