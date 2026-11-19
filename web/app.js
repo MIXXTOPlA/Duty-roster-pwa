@@ -30,6 +30,31 @@ async function readState(){const db=await dbOpen();return new Promise((resolve,r
 async function writeState(){const db=await dbOpen();return new Promise((resolve,reject)=>{const tx=db.transaction('state','readwrite');tx.objectStore('state').put({working,versions,people,restrictions},'current');tx.oncomplete=()=>{db.close();resolve()};tx.onerror=()=>{db.close();reject(tx.error)};});}
 function mondayValid(value){const d=new Date(value+'T00:00:00Z');return !Number.isNaN(d.valueOf())&&d.getUTCDay()===1;}
 function dateAt(day){const d=new Date(monday.value+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+day);return `${d.getUTCMonth()+1}/${d.getUTCDate()}`;}
+function renderAbsenceTimeline(){
+ const root=$('absence-timeline');if(!root)return;
+ root.replaceChildren();
+ const start=Date.parse(monday.value+'T00:00:00Z');
+ if(!Number.isFinite(start))return;
+ const end=start+8*86400000;
+ const relevant=restrictions.filter(r=>Date.parse(r.start+'Z')<end&&Date.parse(r.end+'Z')>start).sort((a,b)=>a.start.localeCompare(b.start));
+ if(!relevant.length){root.textContent='선택한 근무표 기간에 등록된 휴가·외출이 없습니다.';return;}
+ const byId=new Map(people.map(p=>[p.id,p]));
+ for(let day=0;day<8;day++){
+  const d0=start+day*86400000,d1=d0+86400000;
+  const items=relevant.filter(r=>Date.parse(r.start+'Z')<d1&&Date.parse(r.end+'Z')>d0);
+  if(!items.length)continue;
+  const line=document.createElement('div');line.className='absence-day';
+  const date=document.createElement('strong');date.textContent=new Date(d0).toISOString().slice(5,10).replace('-','/');
+  line.append(date);
+  for(const r of items){
+   const tag=document.createElement('span');tag.className='absence-chip '+(r.type==='leave'?'leave':'outing');
+   const fmt=v=>v.slice(5,10).replace('-','/')+' '+v.slice(11,16);
+   tag.textContent=(byId.get(r.personId)?.name||r.personId)+' · '+(r.type==='leave'?'휴가':'외출')+' · '+fmt(r.start)+' ~ '+fmt(r.end);
+   line.append(tag);
+  }
+  root.append(line);
+ }
+}
 function render(){const head=$('roster').tHead,body=$('roster').tBodies[0];head.replaceChildren();body.replaceChildren();const hr=head.insertRow();for(const title of ['날짜','근무',...ROLES.map(role=>roleNames[role])]){const th=document.createElement('th');th.textContent=title;hr.append(th);}
  const assignments=working?.assignments||[],gapBySlot=gapLabels(assignments,working?.history||[]),outs=outAssignments(assignments,working?.restrictions||[],working?.mondayISO),ins=inAssignments(assignments,working?.restrictions||[],working?.mondayISO);const bySlot=new Map(assignments.map(a=>[`${a.day}/${a.shift}/${a.role}`,a]));const byId=new Map(people.map(p=>[p.id,p]));
  for(let day=0;day<8;day++)for(let shift=0;shift<5;shift++){const tr=body.insertRow();if(shift===0)tr.className='day-start';const date=tr.insertCell();date.className='date-cell';if(shift===0){date.textContent=`${dateAt(day)} (${['월','화','수','목','금','토','일','월'][day]})`;date.rowSpan=5;}else{date.remove();}const label=tr.insertCell();label.className='shift-cell';label.textContent=SHIFTS[shift].label;
@@ -37,7 +62,7 @@ function render(){const head=$('roster').tHead,body=$('roster').tBodies[0];head.
  $('undo-edit').disabled=!undoRoster;
  if(working){const v=validateRoster({mondayISO:working.mondayISO,people,assignments:working.assignments,restrictions:working.restrictions||[],history:working.history||[]});metrics.replaceChildren();for(const text of [`필수 미배정 ${v.missingRequired.length}개`,`하드 오류 ${v.errors.length}건`,`총 배정 ${working.assignments.length}건`,`엔진 ${working.engine}`]){const span=document.createElement('span');span.textContent=text;metrics.append(span);}save.disabled=!v.valid;}else{metrics.replaceChildren();save.disabled=true;}
  renderStats();
- renderPeople();renderRestrictions();
+ renderPeople();renderRestrictions();renderAbsenceTimeline();
  const list=$('versions');list.replaceChildren();if(!versions.length)list.textContent='저장된 버전이 없습니다.';for(const [i,v] of versions.entries()){const row=document.createElement('div');row.className='version-row';const title=document.createElement('span');title.textContent=`V${i+1} · ${v.mondayISO} · ${new Date(v.savedAt).toLocaleString('ko-KR')}`;const btn=document.createElement('button');btn.textContent='현재 작업본으로 복원';btn.onclick=async()=>{working=structuredClone(v.snapshot);undoRoster=null;monday.value=working.mondayISO;await writeState();render();status.textContent=`V${i+1}을 현재 작업본으로 복원했어요. 기존 버전은 유지됩니다.`};row.append(title,btn);list.append(row);}}
 function renderStats(){const container=$('stats'),summary=$('stats-summary'),body=$('stats-body');if(!container||!summary||!body)return;body.replaceChildren();summary.replaceChildren();container.hidden=!working;if(!working)return;
  const assignments=working.assignments||[],fairness=analyzeFairness(assignments,people,[]);
@@ -46,11 +71,11 @@ function renderStats(){const container=$('stats'),summary=$('stats-summary'),bod
  const byId=new Map(people.map(p=>[p.id,p]));const roleNamesShort={leader:'분대장',driver:'조종수',rifle:'소총수'};
  for(const p of fairness.perPerson){const person=byId.get(p.personId),weekly=assignments.filter(a=>a.personId===p.personId&&a.day<7),all=assignments.filter(a=>a.personId===p.personId);const tr=body.insertRow();const values=[person?.name||p.personId,roleNamesShort[person?.baseRole]||'-',String(p.weekCount),String(all.length),...Array.from({length:5},(_,shift)=>String(weekly.filter(a=>a.shift===shift).length)),String(p.nightCount),(all.reduce((sum,a)=>sum+SHIFTS[a.shift].durationMinutes,0)/60).toFixed(1),String(p.threeGaps)];for(let i=0;i<values.length;i++){const td=tr.insertCell();td.textContent=values[i];if(i===2&&(p.weekCount<8||p.weekCount>9))td.className='stat-warning';}}
 }
-$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=180');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});undoRoster=null;working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
+$('generate').onclick=async()=>{if(!mondayValid(monday.value)){status.textContent='월요일 날짜를 선택하세요.';return;}const button=$('generate');button.disabled=true;const start=performance.now();status.textContent='편성 엔진 불러오는 중…';try{const {generateRoster}=await import('../src/solver.js?v=190');status.textContent='자동 편성 계산 중…';const input={mondayISO:monday.value,people,assignments:[],restrictions:structuredClone(restrictions),history:[]};const result=await generateRoster(input,{limitMs:60000});undoRoster=null;working={mondayISO:monday.value,assignments:result.assignments||[],restrictions:input.restrictions,history:input.history,engine:result.engine||'unknown'};try{await writeState();}catch(error){status.textContent='로컬 저장 실패: '+String(error);}render();status.textContent=`${result.status==='complete'?'필수 근무 편성 완료':'부분 편성 (실제 근무 사용 금지)'} · ${Math.round(performance.now()-start)}ms · 필수 미배정 ${result.validation?.missingRequired?.length??'알 수 없음'}개 · 하드 오류 ${result.validation?.errors?.length??'알 수 없음'}건`;}catch(error){status.textContent='자동 편성 실행 오류: '+(error?.stack||String(error));}finally{button.disabled=false;}};
 save.onclick=async()=>{if(!working)return;versions.push({mondayISO:working.mondayISO,savedAt:new Date().toISOString(),snapshot:structuredClone(working)});await writeState();render();status.textContent=`V${versions.length} 저장 완료`};
 $('restore').onclick=async()=>{try{const state=await readState();if(!state){status.textContent='저장된 작업본이 없습니다.';return;}working=state.working;undoRoster=null;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;render();status.textContent='기기에 저장된 작업본을 불러왔습니다.';}catch(e){status.textContent='불러오기 실패: '+e}};
-try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.18.0 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
-if(!working)status.textContent='v0.18.0 실행 중 · 자동 편성을 눌러 테스트하세요.';
+try{const state=await readState();if(state){working=state.working;versions=state.versions||[];people=Array.isArray(state.people)?state.people:structuredClone(mockPeople);restrictions=Array.isArray(state.restrictions)?state.restrictions:[];if(working)monday.value=working.mondayISO;status.textContent='v0.19.0 실행 중 · 이전 작업본 자동 복원';}}catch(e){status.textContent='로컬 저장소를 사용할 수 없습니다: '+e;}render();
+if(!working)status.textContent='v0.19.0 실행 중 · 자동 편성을 눌러 테스트하세요.';
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 function renderPeople(){
  const body=$('people-body'),summary=$('people-summary');if(!body)return;
