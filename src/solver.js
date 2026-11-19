@@ -49,7 +49,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
     if(suffix>5)total+=45*(suffix-5)**2;
    }else{
     const availableCount=blocked.get(p.id).filter(x=>!x).length;
-    if(availableCount>=8)total+=5000;
+    if(availableCount>=8)total+=200000;
    }
    for(let i=1;i<all.length;i++){
     const prev=all[i-1],cur=all[i],gap=cur.q-prev.q;
@@ -100,12 +100,39 @@ export async function generateRoster(input,{limitMs=60000}={}){
   const value=score(improved);
   if(value<bestScore){best=improved;bestScore=value;}
  }
- if(completed)best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,14000));
+ if(completed){
+  // Repair uncovered personnel before considering optional duties.
+  best=repairUnassigned(best,people,blocked,available,score,deadline);
+  best=fillOptionalSlots(best,people,blocked,history,started,Math.min(limitMs,14000));
+ }
  const validation=validateRoster({...input,assignments:best});
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'whole-roster-local-search-v6',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'whole-roster-coverage-v7',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'전체 근무표 간격 최적화 완료 (최적해 보장 없음)':'부분 편성: 필수 근무를 완성하지 못했습니다. 실제 근무에 사용 금지'};
+}
+function repairUnassigned(initial,people,blocked,available,score,deadline){
+ const roster=initial.map(a=>({...a}));
+ for(let pass=0;pass<people.length&&Date.now()<deadline;pass++){
+  const absent=people.filter(p=>!roster.some(a=>a.personId===p.id)&&blocked.get(p.id).filter(x=>!x).length>=8);
+  if(!absent.length)break;
+  let changed=false;
+  for(const p of absent){
+   let bestIndex=-1,bestValue=Infinity;
+   for(let i=0;i<roster.length;i++){
+    const a=roster[i];
+    if(a.locked||!available(p,a,roster,i))continue;
+    const previous=a.personId;
+    a.personId=p.id;
+    const value=score(roster);
+    a.personId=previous;
+    if(value<bestValue){bestValue=value;bestIndex=i;}
+   }
+   if(bestIndex>=0){roster[bestIndex].personId=p.id;changed=true;}
+  }
+  if(!changed)break;
+ }
+ return roster;
 }
 function optimize(roster,people,available,score,deadline){
  let best=score(roster);
