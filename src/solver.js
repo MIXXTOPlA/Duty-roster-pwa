@@ -86,7 +86,7 @@ export async function generateRoster(input,{limitMs=60000}={}){
  const status=completed&&validation.valid?'complete':'partial';
  return {status,assignments:best,validation,
   fairness:analyzeFairness(best,people,input.history||[]),
-  engine:'bounded-js-gap-first-v3',optimal:false,attempts,elapsedMs:Date.now()-started,
+  engine:'bounded-js-flex-optional-v4',optimal:false,attempts,elapsedMs:Date.now()-started,
   message:status==='complete'?'필수 근무 편성 완료':'부분 편성: 탐색 한계 내에서 완성하지 못함. 실제 근무에 사용 금지'};
 }
 function balanceRoster(initial,people,blocked,history,started,budgetMs){
@@ -197,14 +197,22 @@ function fillOptionalSlots(initial,people,blocked,history,started,budgetMs){
    const n=nights.get(p.id);
    delta+=4*((n+1-nightTarget)**2-(n-nightTarget)**2);
   }
-  // Optional assignments must improve an actual long gap, never just add workload.
+  // Optional duties may be 3 shifts apart; never move or remove required duties.
+  // Only fill an internal gap, with a measurable spacing improvement.
   if(before===undefined||after===undefined||after-before<7)return Infinity;
   if(seq-before<3||after-seq<3)return Infinity;
-  if(seq-before===3&&all.some((x,i)=>i>0&&x===before&&before-all[i-1]===3))return Infinity;
-  delta+=18;
+  const earlier=all.filter(x=>x<before).at(-1);
+  const later=all.find(x=>x>after);
+  if(earlier!==undefined&&before-earlier===3&&seq-before===3)return Infinity;
+  if(later!==undefined&&later-after===3&&after-seq===3)return Infinity;
+  if(seq-before===3&&after-seq===3)return Infinity;
+  // A long gap is worth bridging even when one new interval is 3.
+  // Adding optional duties solely to equalize duty counts is not sufficient.
+  if(delta>=-10)return Infinity;
+  delta+=12;
   // Keep reserve-driver assignments for drivers, and prefer rifle specialists for radio.
-  if(slot.role==='radio'&&p.baseRole==='leader')delta+=35;
-  if(slot.role==='radio'&&p.baseRole==='driver')delta+=20;
+  if(slot.role==='radio'&&p.baseRole==='leader')delta+=15;
+  if(slot.role==='radio'&&p.baseRole==='driver')delta+=10;
   return delta;
  };
  for(let n=0;n<slots.length&&Date.now()-started<budgetMs;n++){
