@@ -107,5 +107,6 @@ $('absence-form').onsubmit=async e=>{
   $('absence-status').textContent='같은 인원의 기존 일정과 겹칩니다.';return;
  }
  restrictions.push({id:'A'+(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)),personId,type,start,end});
+ if(working)working.restrictions=structuredClone(restrictions);
  await writeState();render();$('absence-status').textContent='일정 저장 완료. 새로 자동 편성하면 반영됩니다.';
 };
