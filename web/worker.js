@@ -1,0 +1,2 @@
+import {generateRoster} from '../src/solver.js';
+self.onmessage=async event=>{try{const result=await generateRoster(event.data,{limitMs:60000});self.postMessage({ok:true,result});}catch(error){self.postMessage({ok:false,error:String(error)});}};
