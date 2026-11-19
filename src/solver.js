@@ -101,7 +101,8 @@ function balanceRoster(initial,people,blocked,history,started,budgetMs){
   for(const a of roster){const st=stats.get(a.personId);if(!st)continue;
    st.hours+=duration(a);if(a.day<7){st.week++;if(a.shift>=3)st.night++;}st.seqs.push({seq:seq(a),role:a.role});}
   let total=0;
-  for(const a of roster){if(a.role==='rifle'||a.role==='m60'){const base=byId.get(a.personId)?.baseRole;if(base==='driver')total+=450;else if(base==='leader')total+=900;}}\n  for(const st of stats.values()){
+  for(const a of roster){if(a.role==='rifle'||a.role==='m60'){const base=byId.get(a.personId)?.baseRole;if(base==='driver')total+=450;else if(base==='leader')total+=900;}}
+  for(const st of stats.values()){
    total+=12*(st.week-targetWeekly)**2+0.0004*(st.hours-targetHours)**2+8*(st.night-targetNight)**2;
    st.seqs.sort((a,b)=>a.seq-b.seq);
    for(let i=1;i<st.seqs.length;i++){
