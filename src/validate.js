@@ -1,4 +1,4 @@
-import {SHIFTS,ROLES,REQUIRED_ROLES,MIN_GAP,slotIndex,shiftInterval,eligible} from './model.js';
+import {SHIFTS,ROLES,REQUIRED_ROLES,MIN_GAP,slotIndex,shiftInterval,eligible,allowedBeforeLeave} from './model.js';
 // assignments: [{day:0..7, shift:0..4, role:'leader'..., personId:'...'}]
 // restrictions: [{personId, start:'YYYY-MM-DDTHH:mm', end:'YYYY-MM-DDTHH:mm'}]
 // locked assignments use the same shape with locked:true.
@@ -13,6 +13,7 @@ export function validateRoster({mondayISO,people,assignments,restrictions=[],his
   const p=peopleById.get(a.personId);
   if(!p){add('UNKNOWN_PERSON',{assignment:a});continue;}
   if(!eligible(p,a.role))add('INELIGIBLE_ROLE',{assignment:a});
+  if(!allowedBeforeLeave(mondayISO,restrictions,a.personId,a.day,a.shift))add('INVALID_PRE_LEAVE_SHIFT',{assignment:a});
   const iso=new Date(Date.parse(mondayISO+'T00:00:00Z')+a.day*86400000).toISOString().slice(0,10);
   const interval=shiftInterval(iso,SHIFTS[a.shift].id);
   for(const r of restrictions.filter(r=>r.personId===a.personId)){
